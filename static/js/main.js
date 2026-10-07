@@ -403,8 +403,12 @@ async function loadImage(i) {
   showBusy(`加载 ${state.imageName} …`);
   try {
     const img = new Image();
-    img.src = `/api/image/${state.images[i]}`;
-    await img.decode();
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = () => rej(new Error("图像加载失败: " + img.src));
+      img.src = `/api/image/${state.images[i]}`;
+      if (img.complete && img.naturalWidth) res();   // 命中缓存时 onload 可能已错过
+    });
     state.img = img;
 
     let ann = null;
