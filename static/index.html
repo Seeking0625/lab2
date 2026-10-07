@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>SAM 遥感标注修正工具</title>
+<style>
+:root { --bg:#1e1f24; --panel:#2a2c33; --line:#3a3d47; --txt:#d8dae0; --accent:#4f8cff; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--txt); font:13px/1.5 "Segoe UI",system-ui,sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+header { display:flex; align-items:center; gap:10px; padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+header h1 { font-size:15px; margin-right:10px; white-space:nowrap; }
+button { background:#3a3d47; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 12px; cursor:pointer; font-size:13px; }
+button:hover { background:#454956; }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+button.mode.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+.spacer { flex:1; }
+#dirty { color:#ffb020; font-size:12px; visibility:hidden; }
+main { flex:1; display:flex; min-height:0; }
+#sidebarL { width:230px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+#sidebarR { width:260px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+.panel-h { padding:8px 12px; font-weight:600; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+.scroll { overflow-y:auto; flex:1; min-height:0; }
+#imgList div, .inst-row { padding:4px 12px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#imgList div:hover, .inst-row:hover { background:#34363f; }
+#imgList div.active { background:var(--accent); color:#fff; }
+.cls-row { display:flex; align-items:center; gap:8px; padding:4px 12px; cursor:pointer; }
+.cls-row:hover { background:#34363f; }
+.cls-row.active { background:#3d4456; }
+.dot { width:14px; height:14px; border-radius:3px; flex:none; }
+#addClass { display:flex; gap:6px; padding:8px 12px; border-top:1px solid var(--line); }
+#addClass input { flex:1; min-width:0; background:#1e1f24; border:1px solid var(--line); color:var(--txt); border-radius:6px; padding:4px 8px; }
+#canvasWrap { flex:1; position:relative; min-width:0; background:#141519; }
+canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+#hud { position:absolute; left:10px; bottom:10px; background:rgba(0,0,0,.55); padding:4px 10px; border-radius:6px; font-size:12px; pointer-events:none; }
+#hint { position:absolute; top:10px; left:50%; transform:translateX(-50%); background:rgba(79,140,255,.9); color:#fff; padding:4px 14px; border-radius:14px; font-size:12px; display:none; }
+#busy { position:absolute; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; flex-direction:column; gap:12px; z-index:10; }
+.spin { width:36px; height:36px; border:4px solid #555; border-top-color:var(--accent); border-radius:50%; animation:r 1s linear infinite; }
+@keyframes r { to { transform:rotate(360deg); } }
+.info-row { display:flex; justify-content:space-between; gap:8px; padding:5px 12px; }
+.info-row b { font-weight:600; }
+#instClass { width:100%; background:#1e1f24; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px; margin:6px 0; }
+.cand-card { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 12px; cursor:pointer; }
+.cand-card:hover { border-color:var(--accent); background:#31343e; }
+.kbd { background:#1e1f24; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:11px; }
+#stats { padding:6px 12px; border-top:1px solid var(--line); font-size:12px; color:#9aa0ac; }
+.helpline { padding:8px 12px; font-size:12px; color:#9aa0ac; border-top:1px solid var(--line); }
+#reportModal { position:absolute; inset:0; background:rgba(0,0,0,.55); display:none; z-index:20; }
+.modal-box { position:absolute; inset:5% 8%; background:var(--panel); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+#reportBody { padding:16px 22px; }
+#reportBody h1 { font-size:18px; margin:6px 0 12px; }
+#reportBody h2 { font-size:15px; margin:14px 0 8px; color:var(--accent); }
+#reportBody table { border-collapse:collapse; margin:8px 0; }
+#reportBody th, #reportBody td { border:1px solid var(--line); padding:4px 12px; text-align:left; }
+#reportBody th { background:#33363f; }
+#reportBody p { margin:8px 0; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SAM 遥感标注修正</h1>
+  <button class="mode active" data-mode="select">选择/改类</button>
+  <button class="mode" data-mode="merge">合并</button>
+  <button class="mode" data-mode="resegment">点选重分割</button>
+  <button class="mode" data-mode="box">框选新增</button>
+  <span class="spacer"></span>
+  <span id="dirty">● 未保存</span>
+  <button id="btnUndo">撤销 (Ctrl+Z)</button>
+  <button id="btnSave" class="primary">保存 (Ctrl+S)</button>
+  <button id="btnReport">生成报告</button>
+  <button id="btnFit">适应窗口</button>
+  <button id="btnPrev">◀</button><button id="btnNext">▶</button>
+</header>
+<main>
+  <div id="sidebarL">
+    <div class="panel-h">图像 <span id="imgCount"></span></div>
+    <div id="imgList" class="scroll"></div>
+    <div class="panel-h">类别 <span id="clsCount"></span></div>
+    <div id="clsList" class="scroll" style="flex:1"></div>
+    <div id="addClass">
+      <input id="newClsName" placeholder="新类别名称，回车添加">
+      <button id="btnAddCls">添加</button>
+    </div>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="cv" tabindex="0"></canvas>
+    <div id="hint"></div>
+    <div id="hud"></div>
+    <div id="busy"><div class="spin"></div><div id="busyMsg">处理中…</div></div>
+    <div id="reportModal">
+      <div class="modal-box">
+        <div class="panel-h">分析报告
+          <span>
+            <button id="btnDlReport" class="primary">下载 .md</button>
+            <button id="btnCloseReport">关闭</button>
+          </span>
+        </div>
+        <div id="reportBody" class="scroll"></div>
+      </div>
+    </div>
+  </div>
+  <div id="sidebarR">
+    <div class="panel-h">选中实例</div>
+    <div id="selInfo" class="scroll">
+      <div class="helpline">未选中实例。点击画布中的彩色区域选择。</div>
+    </div>
+    <div class="panel-h">实例列表 <span id="instCount"></span></div>
+    <div id="instList" class="scroll" style="flex:1.2"></div>
+    <div id="stats"></div>
+  </div>
+</main>
+<script src="/static/js/main.js"></script>
+</body>
+</html>

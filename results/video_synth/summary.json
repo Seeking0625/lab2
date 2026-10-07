@@ -1,0 +1,19 @@
+{
+ "video": "synth.mp4",
+ "meta": {
+  "fps": 25.0,
+  "total_frames": 300,
+  "width": 1280,
+  "height": 720
+ },
+ "keyframes": 12,
+ "stride": 25,
+ "avg_instances": 59.8,
+ "region_ranking": [],
+ "cls_total": {},
+ "trend": "前段平均实例数 64 -> 后段 56，目标数量呈减少态势",
+ "outputs": {
+  "report": "results/video_synth/report.md",
+  "annotated_video": "results/video_synth/annotated.mp4"
+ }
+}

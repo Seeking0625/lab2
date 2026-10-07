@@ -1,0 +1,12 @@
+# 大文件与原始数据不入库（见 README「数据准备」）
+asset/*.pth
+dataset/images/
+train/
+sam_env/
+
+# Python
+__pycache__/
+*.pyc
+
+# 大尺寸可视化中间图
+results/vis/

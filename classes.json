@@ -1,0 +1,62 @@
+[
+ {
+  "name": "airplane 飞机",
+  "color": "#e6194b"
+ },
+ {
+  "name": "small-vehicle 小型车辆",
+  "color": "#3cb44b"
+ },
+ {
+  "name": "large-vehicle 大型车辆",
+  "color": "#4363d8"
+ },
+ {
+  "name": "storage-tank 储油罐",
+  "color": "#ffe119"
+ },
+ {
+  "name": "swimming-pool 泳池",
+  "color": "#42d4f4"
+ },
+ {
+  "name": "harbor 港口",
+  "color": "#911eb4"
+ },
+ {
+  "name": "bridge 桥梁",
+  "color": "#f032e6"
+ },
+ {
+  "name": "building 建筑",
+  "color": "#469990"
+ },
+ {
+  "name": "farmland 农田",
+  "color": "#9a6324"
+ },
+ {
+  "name": "road 道路",
+  "color": "#808000"
+ },
+ {
+  "name": "helicopter 直升机",
+  "color": "#800000"
+ },
+ {
+  "name": "roundabout 环岛",
+  "color": "#aaffc3"
+ },
+ {
+  "name": "soccer-ball-field 足球场",
+  "color": "#808fff"
+ },
+ {
+  "name": "basketball-court 篮球场",
+  "color": "#ffd8b1"
+ },
+ {
+  "name": "tennis-court 网球场",
+  "color": "#e6beff"
+ }
+]
