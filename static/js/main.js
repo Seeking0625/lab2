@@ -343,9 +343,9 @@ async function splitAuto(imgPt, replaceId) {
     state.dirty = true; markDirty();
     render(); refreshSelInfo(); refreshInstList();
   } catch (e) {
-    state.undoStack.pop(); hideBusy();
+    state.undoStack.pop();
     alert(e.message || "拆分失败");
-  }
+  } finally { hideBusy(); }
 }
 
 async function samBox(box) {
