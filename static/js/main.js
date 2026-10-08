@@ -373,6 +373,7 @@ async function applyCandidate(i) {
     try {
       const parts = await post("/api/edit/split", {image:state.imageName, original:old, candidate:c});
       state.ann.instances.splice(replaceId, 1, ...parts);
+      if (parts.length === 1) console.info("候选覆盖了整个实例，已执行替换而非拆分");
     } finally { hideBusy(); }
   } else {
     c.class = state.classes[state.activeCls].name;

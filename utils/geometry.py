@@ -42,21 +42,40 @@ def instances_from_mask(mask, template, offset=(0, 0)):
     return result
 
 
-def split_instance(original, candidate, shape):
+def _reassign_fragments(a, b, min_area):
+    """把双方小于 min_area 的连通域像素转移给对方，消除无法编码为多边形的细小碎片。
+
+    SAM 候选边界与原实例边界交错时经常产生 1~2 像素的碎片，直接拆分会丢像素或报错；
+    转移后每部分只剩大连通域，多边形化稳定。
+    """
+    for src, dst in ((b, a), (a, b)):
+        n, labels = cv2.connectedComponents(src.astype(np.uint8))
+        for k in range(1, n):
+            part = labels == k
+            if int(part.sum()) < min_area:
+                src[part] = 0
+                dst[part] = 1
+
+
+def split_instance(original, candidate, shape, min_ratio=0.01):
+    """把原实例按候选掩码拆成两部分。
+
+    - 占比小于 min_ratio 的碎片自动并入相邻部分，不再因细小碎片报错；
+    - 候选覆盖整个实例（剩余区域为空）时降级为替换语义，返回单个实例；
+    - 返回实例列表：长度 2 = 正常拆分，长度 1 = 降级替换。
+    """
     base, cut = mask_for(original, shape), mask_for(candidate, shape)
     chosen = base & cut
-    rest = base & (1-cut)
-    if not chosen.any() or not rest.any():
-        raise ValueError('候选必须将原实例分成至少两部分，请换一个提示点。')
+    rest = base & (1 - cut)
+    if not chosen.any():
+        raise ValueError('候选与原实例没有重叠，请点击目标内部再试。')
+    min_area = max(24, int(base.sum() * min_ratio))
+    _reassign_fragments(chosen, rest, min_area)
+    if not rest.any():
+        return instances_from_mask(chosen, original)
     parts = instances_from_mask(chosen, original) + instances_from_mask(rest, original)
     if len(parts) < 2:
-        raise ValueError('分割区域过小，请换一个提示点。')
-    # Preserve every pixel; contours of one-pixel fragments cannot encode a polygon.
-    rebuilt = np.zeros(shape[:2], np.uint8)
-    for part in parts:
-        rebuilt |= mask_for(part, shape)
-    if not np.array_equal(rebuilt, base):
-        raise ValueError('候选含无法保存为多边形的细小碎片，请调整提示点。')
+        return instances_from_mask(base, original)
     return parts
 
 
