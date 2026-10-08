@@ -9,6 +9,7 @@
 body { background:var(--bg); color:var(--txt); font:13px/1.5 "Segoe UI",system-ui,sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
 header { display:flex; align-items:center; gap:10px; padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
 header h1 { font-size:15px; margin-right:10px; white-space:nowrap; }
+select, input { background:#1e1f24; color:var(--txt); border:1px solid var(--line); border-radius:4px; padding:3px; }
 button { background:#3a3d47; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 12px; cursor:pointer; font-size:13px; }
 button:hover { background:#454956; }
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -60,20 +61,39 @@ canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
 <header>
   <h1>SAM 遥感标注修正</h1>
   <button class="mode active" data-mode="select">选择/改类</button>
+  <button class="mode" data-mode="pan" title="左键拖动画面；其他模式也可按住空格拖动">拖动画面</button>
   <button class="mode" data-mode="merge">合并</button>
   <button class="mode" data-mode="resegment">点选重分割</button>
   <button class="mode" data-mode="box">框选新增</button>
+  <button class="mode" data-mode="refine">正负点修边</button>
+  <button class="mode" data-mode="crop">裁成局部图</button>
   <span class="spacer"></span>
   <span id="dirty">● 未保存</span>
+  <select id="segmentProfile" title="少量清晰目标会略过小碎片和大背景；标小目标时切回标准"><option value="focused">少量清晰目标</option><option value="standard">标准分割（含小目标）</option></select>
+  <button id="btnAuto">分割并自动分类</button>
+  <button id="btnClassify">自动分类</button>
+  <button hidden id="btnTrain" title="仅使用当前图像分组中人工确认的标签">训练本组与评估</button>
+  <button hidden id="btnScale">尺度实验</button>
   <button id="btnUndo">撤销 (Ctrl+Z)</button>
+  <button id="btnConfirmLabels">确认所选预测标签</button>
   <button id="btnSave" class="primary">保存 (Ctrl+S)</button>
   <button id="btnReport">生成报告</button>
   <button id="btnFit">适应窗口</button>
   <button id="btnPrev">◀</button><button id="btnNext">▶</button>
 </header>
+<div style="padding:6px 14px;background:#2a2c33;display:flex;gap:10px;align-items:center">
+  <label>遥感视频 <select id="videoSelect"></select></label>
+  <label>抽帧间隔 <input id="videoStride" type="number" min="1" value="25" style="width:65px"></label>
+  <button id="btnVideo">分析视频 / 更新报告</button>
+  <span id="taskStatus">先标注多个类别，再训练分类器。预测标签需人工确认后才用于训练。</span>
+</div>
 <main>
   <div id="sidebarL">
     <div class="panel-h">图像 <span id="imgCount"></span></div>
+    <div style="padding:6px 12px"><select id="imageGroup" style="width:100%">
+      <option value="practice">推荐练习图</option><option value="original">原始图片</option>
+      <option value="crop">我的局部图</option><option value="video">视频关键帧</option><option value="all">全部图像</option>
+    </select></div>
     <div id="imgList" class="scroll"></div>
     <div class="panel-h">类别 <span id="clsCount"></span></div>
     <div id="clsList" class="scroll" style="flex:1"></div>
@@ -105,6 +125,12 @@ canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
       <div class="helpline">未选中实例。点击画布中的彩色区域选择。</div>
     </div>
     <div class="panel-h">实例列表 <span id="instCount"></span></div>
+    <div style="padding:6px 12px;display:flex;gap:5px;flex-wrap:wrap">
+      <select id="instanceFilter"><option value="all">全部实例</option><option value="todo">只看未标注</option><option value="labeled">已赋类</option></select>
+      <label>最小面积 <input id="minVisibleArea" type="number" min="0" value="0" style="width:65px"></label>
+      <label><input id="showMasks" type="checkbox" checked> 显示掩码</label>
+      <button id="btnNextInstance">下一个待标注 (N)</button>
+    </div>
     <div id="instList" class="scroll" style="flex:1.2"></div>
     <div id="stats"></div>
   </div>
