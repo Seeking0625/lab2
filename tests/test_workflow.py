@@ -8,7 +8,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from utils.geometry import mask_for, split_instance, merge_instances
+from utils.geometry import mask_for, split_instance, merge_instances, resegment_candidates
 from utils.annotation_workflow import create_crop, filter_proposals
 from utils.classifier import (train_classifier, load_samples, load_model, classify_annotation,
                               write_json, metrics)
@@ -74,6 +74,26 @@ class WorkflowTests(unittest.TestCase):
         np.testing.assert_array_equal(masks[0]|masks[1],mask_for(original,(32,32)))
         self.assertEqual(sum(p['area'] for p in parts),625)
         with self.assertRaises(ValueError): split_instance(original,original,(32,32))
+
+    def test_resegment_preview_and_thin_remainder(self):
+        original=rect(2,2,10,10,'red');original['label_source']='manual'
+        # A nine-pixel-wide candidate leaves a one-pixel-wide strip.
+        candidate=rect(2,2,9,10)
+        parts=split_instance(original,candidate,(32,32))
+        self.assertEqual(len(parts),2)
+        rebuilt=np.zeros((32,32),np.uint8)
+        for p in parts:rebuilt |= mask_for(p,(32,32))
+        np.testing.assert_array_equal(rebuilt,mask_for(original,(32,32)))
+        self.assertTrue(all(p['label_source']=='manual' for p in parts))
+        # Legacy polygons can extend beyond their recorded bbox.
+        legacy=rect(2,2,11,11);legacy["bbox"]=[2,2,10,10]
+        rebuilt=np.zeros((32,32),np.uint8)
+        for part in split_instance(legacy,candidate,(32,32)):rebuilt |= mask_for(part,(32,32))
+        np.testing.assert_array_equal(rebuilt,mask_for(legacy,(32,32)))
+        expanded=rect(1,1,12,12)
+        previews=resegment_candidates(original,[original,rect(20,20,3,3),candidate,expanded],(32,32))
+        self.assertEqual([p['edit_action'] for p in previews],['split','replace'])
+        self.assertEqual(len(previews[0]['split_parts']),2)
 
     def test_merge_uses_union_area(self):
         a,b=rect(1,1,10,10,'red'),rect(6,1,10,10,'red')

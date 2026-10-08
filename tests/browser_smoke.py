@@ -114,6 +114,15 @@ def main():
                 assert page.evaluate('state.ann.instances.length')==2
                 page.locator('#btnUndo').click()
                 page.locator('#btnSave').click();page.wait_for_function('!state.dirty')
+                # Point resegmentation can offer a replacement without attempting a split.
+                page.evaluate('''() => {pushUndo();state.pending={replaceId:0,cands:[{class:"unlabeled",edit_action:"replace",bbox:[8,8,54,44],area:2376,score:.99,polygons:[[[8,8],[61,8],[61,51],[8,51]]]}]};showCands(state.pending.cands);}''')
+                assert page.locator('.cand-card').first.inner_text().find('修正边界')>=0
+                page.locator('.cand-card').first.click()
+                page.wait_for_function('!state.pending && state.ann.instances[0].bbox[0]===8')
+                assert page.evaluate('state.ann.instances[0].class')=='airplane 飞机'
+                assert page.evaluate('state.ann.instances.length')==2
+                assert not page.evaluate('"edit_action" in state.ann.instances[0]')
+                page.locator('#btnUndo').click()
                 assert not errors,errors
                 assert not dialogs,dialogs
                 screenshot=Path(app.BASE)/'results/local_run/browser_smoke.png'

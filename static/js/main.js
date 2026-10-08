@@ -315,13 +315,14 @@ async function samPoint(imgPt, replaceId) {
     const r = await fetch("/api/sam/point", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        image: state.imageName, points: [[Math.round(imgPt[0]), Math.round(imgPt[1]), 1]],
+        image: state.imageName, points: [[imgPt[0], imgPt[1], 1]],
         bbox: bbox.map(Math.round),
+        original: inst,
       }),
     });
     const cands = await r.json();
     if (!r.ok) throw new Error(cands.error || "SAM 推理失败");
-    if (!cands.length) return alert("SAM 未返回有效掩码，请换位置点击");
+    if (!cands.length) return alert("没有可应用的新结果，请换一个目标内部点，或用正负点修边排除背景。");
     pushUndo();
     state.pending = { cands, replaceId };
     showCands(cands);
@@ -351,7 +352,8 @@ function showCands(cands) {
   cands.forEach((c, i) => {
     const card = document.createElement("div");
     card.className = "cand-card";
-    card.innerHTML = `<b>候选 ${i + 1}</b>（分数 ${c.score}，面积 ${c.area.toLocaleString()}）`;
+    const action = c.edit_action === "split" ? `拆分为 ${c.split_parts.length} 块，保留剩余区域` : c.edit_action === "replace" ? "修正边界，替换原实例" : "";
+    card.innerHTML = `<b>候选 ${i + 1}</b>（分数 ${c.score}，面积 ${c.area.toLocaleString()}）<div>${action}</div>`;
     card.onclick = () => applyCandidate(i);
     box.appendChild(card);
   });
@@ -359,6 +361,7 @@ function showCands(cands) {
 
 async function applyCandidate(i) {
   if (!state.pending) return;
+  if (state.pending.applying) return;
   const { cands, replaceId } = state.pending;
   const c = cands[i];
   if (state.pending.kind === "refine") {
@@ -369,11 +372,14 @@ async function applyCandidate(i) {
   } else if (replaceId != null) {
     const old = state.ann.instances[replaceId];
     c.class = old && old.class !== "unlabeled" ? old.class : "unlabeled";
-    showBusy("拆分实例并保留剩余区域…");
+    showBusy(c.edit_action === "replace" ? "应用新的实例边界…" : "拆分实例并保留剩余区域…");
     try {
-      const parts = await post("/api/edit/split", {image:state.imageName, original:old, candidate:c});
+      state.pending.applying = true;
+      const parts = c.edit_action === "replace" ? [{...c, class:old.class, label_source:old.label_source || "manual"}] :
+        c.split_parts || await post("/api/edit/split", {image:state.imageName, original:old, candidate:c});
+      parts.forEach(p => { delete p.split_parts; delete p.edit_action; });
       state.ann.instances.splice(replaceId, 1, ...parts);
-    } finally { hideBusy(); }
+    } finally { if (state.pending) state.pending.applying = false; hideBusy(); }
   } else {
     c.class = state.classes[state.activeCls].name;
     c.label_source = "manual";
@@ -397,7 +403,7 @@ const HINTS = {
   select: "左键点选实例；数字键 1-9 改类别；按住空格拖动平移，滚轮缩放",
   pan: "按住左键拖动平移图片，滚轮缩放；切回「选择/改类」编辑实例",
   merge: "依次点击需要合并的实例（可多点几个），右侧「合并所选」",
-  resegment: "点击实例内部进行拆分，采用候选后保留剩余区域",
+  resegment: "点击实例内部重新分割；候选标明拆分或修正边界，拆分会保留剩余区域",
   refine: "先左键点选要修边的实例，再左键添加内部点、右键排除背景；最后采用候选",
   crop: "拖出一个目标清楚的局部区域，保存为独立图片后再标注",
   box: "按住左键拖出矩形框住新目标：SAM 分割后作为新实例（用当前激活类别）",
@@ -821,7 +827,7 @@ async function refinePoint(point, label) {
     state.prompts = {replaceId:inst.id, bbox:inst.bbox.slice(), points:[]};
     pushUndo();
   }
-  state.prompts.points.push([Math.round(point[0]),Math.round(point[1]),label]);
+  state.prompts.points.push([point[0],point[1],label]);
   const prompts = state.prompts;
   showBusy("根据正负点修正边界…");
   try {

@@ -313,6 +313,13 @@ def api_sam_point():
         return jsonify({"error": "image not found"}), 404
     image = cv2.imread(p)
     points = data["points"]
+    if image is None:raise ValueError('图片无法读取。')
+    points=np.asarray(points,dtype=np.float32)
+    if points.ndim!=2 or points.shape[1]!=3 or not len(points) or not np.isfinite(points).all():
+        raise ValueError('请提供有效的提示点。')
+    if not np.isin(points[:,2],[0,1]).all():raise ValueError('提示点标签必须为0或1。')
+    if ((points[:,0]<0)|(points[:,0]>=image.shape[1])|(points[:,1]<0)|(points[:,1]>=image.shape[0])).any():
+        raise ValueError('请在图片范围内点击。')
     box = data.get("bbox")
     if box is None:
         cx, cy = points[0][0], points[0][1]
@@ -329,7 +336,11 @@ def api_sam_point():
     masks, scores, _ = predictor.predict(
         point_coords=coords, point_labels=labels, box=local_box,
         multimask_output=True)
-    return jsonify(_candidates_from_masks(crop, masks, scores, ox, oy))
+    candidates=_candidates_from_masks(crop, masks, scores, ox, oy)
+    if data.get('original'):
+        from utils.geometry import resegment_candidates
+        candidates=resegment_candidates(data['original'],candidates,image.shape[:2])
+    return jsonify(candidates)
 
 
 @app.post("/api/sam/box")

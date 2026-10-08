@@ -28,7 +28,7 @@ def instances_from_mask(mask, template, offset=(0, 0)):
         polygons, holes = [], []
         for i, contour in enumerate(contours):
             if len(contour) < 3:
-                continue
+                contour = np.concatenate([contour, np.repeat(contour[-1:], 3-len(contour), axis=0)])
             ring = (contour.reshape(-1, 2) + np.array(offset)).tolist()
             (polygons if hierarchy[0][i][3] < 0 else holes).append(ring)
         if not polygons:
@@ -42,22 +42,56 @@ def instances_from_mask(mask, template, offset=(0, 0)):
     return result
 
 
+def region_bounds(original, shape):
+    x,y,w,h=map(int,original['bbox']);right,bottom=x+w,y+h
+    points=[p for ring in original.get('polygons',[original.get('polygon',[])]) for p in ring]
+    if points:
+        pts=np.rint(points).astype(np.int32)
+        x,y=min(x,int(pts[:,0].min())),min(y,int(pts[:,1].min()))
+        right,bottom=max(right,int(pts[:,0].max())+1),max(bottom,int(pts[:,1].max())+1)
+    x,y=max(0,x),max(0,y)
+    w,h=min(shape[1],right)-x,min(shape[0],bottom)-y
+    if w<=0 or h<=0:raise ValueError('原实例超出图像。')
+    return x,y,w,h
+
+
 def split_instance(original, candidate, shape):
-    base, cut = mask_for(original, shape), mask_for(candidate, shape)
+    x,y,w,h=region_bounds(original,shape)
+    local_shape=(int(h),int(w));offset=(x,y)
+    base, cut = mask_for(original, local_shape, offset), mask_for(candidate, local_shape, offset)
     chosen = base & cut
     rest = base & (1-cut)
     if not chosen.any() or not rest.any():
         raise ValueError('候选必须将原实例分成至少两部分，请换一个提示点。')
-    parts = instances_from_mask(chosen, original) + instances_from_mask(rest, original)
+    parts = instances_from_mask(chosen, original, offset) + instances_from_mask(rest, original, offset)
     if len(parts) < 2:
         raise ValueError('分割区域过小，请换一个提示点。')
-    # Preserve every pixel; contours of one-pixel fragments cannot encode a polygon.
-    rebuilt = np.zeros(shape[:2], np.uint8)
+    # Verify that polygon serialization preserves the full original region.
+    rebuilt = np.zeros(local_shape, np.uint8)
     for part in parts:
-        rebuilt |= mask_for(part, shape)
+        rebuilt |= mask_for(part, local_shape, offset)
     if not np.array_equal(rebuilt, base):
         raise ValueError('候选含无法保存为多边形的细小碎片，请调整提示点。')
     return parts
+
+
+def resegment_candidates(original, candidates, shape):
+    """Preview only applicable edits; distinguish splitting from replacing a boundary."""
+    x,y,w,h=region_bounds(original,shape);offset=(x,y)
+    base=mask_for(original,(h,w),offset)
+    result=[]
+    for candidate in candidates:
+        cut=mask_for(candidate,(h,w),offset)
+        if not (base & cut).any():continue
+        item=copy.deepcopy(candidate)
+        try:
+            item['split_parts']=split_instance(original,candidate,shape)
+            item['edit_action']='split'
+        except ValueError:
+            if candidate['bbox']==original['bbox'] and np.array_equal(cut,base):continue
+            item['edit_action']='replace'
+        result.append(item)
+    return result
 
 
 def merge_instances(instances, shape):
