@@ -328,6 +328,26 @@ async function samPoint(imgPt, replaceId) {
   } finally { hideBusy(); }
 }
 
+async function splitAuto(imgPt, replaceId) {
+  const old = state.ann.instances[replaceId];
+  showBusy("正在拆分实例…");
+  pushUndo();
+  try {
+    const r = await post("/api/edit/split-auto", {
+      image: state.imageName,
+      original: old,
+      point: [Math.round(imgPt[0]), Math.round(imgPt[1])],
+    });
+    state.ann.instances.splice(replaceId, 1, ...r.parts);
+    state.pending = null; state.prompts = null;
+    state.dirty = true; markDirty();
+    render(); refreshSelInfo(); refreshInstList();
+  } catch (e) {
+    state.undoStack.pop(); hideBusy();
+    alert(e.message || "拆分失败");
+  }
+}
+
 async function samBox(box) {
   showBusy("SAM 推理中…");
   try {
@@ -583,7 +603,7 @@ cv.addEventListener("mousedown", (e) => {
     return;
   }
   // select / resegment
-  if (state.mode === "resegment" && inst) return samPoint([ix, iy], inst.id);
+  if (state.mode === "resegment" && inst) return splitAuto([ix, iy], inst.id);
   if (e.shiftKey && inst) {
     state.selected.has(inst.id) ? state.selected.delete(inst.id) : state.selected.add(inst.id);
   } else state.selected = new Set(inst ? [inst.id] : []);

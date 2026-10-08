@@ -418,6 +418,44 @@ def api_split():
     return jsonify(split_instance(data['original'], data['candidate'], image.shape[:2]))
 
 
+@app.post('/api/edit/split-auto')
+def api_split_auto():
+    """点选自动拆分：SAM 出候选后自动挑选能真正一分为二的一个。
+
+    body: {image, original: 实例, point: [x, y]}
+    返回 {parts: [实例...]}，必定为 2 个部分；无子结构时 400。
+    """
+    from utils.geometry import split_instance
+    data = request.get_json()
+    image = cv2.imread(_image_path(data['image']) or '')
+    if image is None:
+        raise ValueError('图像不存在。')
+    original, (px, py) = data['original'], data['point']
+    x, y, w, h = original['bbox']
+    m = 24
+    box = [max(0, x - m), max(0, y - m), w + 2 * m, h + 2 * m]
+    crop, ox, oy = _crop_with_margin(image, box)
+    predictor = get_predictor()
+    predictor.set_image(crop, image_format='BGR')
+    masks, scores, _ = predictor.predict(
+        point_coords=np.array([[px - ox, py - oy]], dtype=np.float32),
+        point_labels=np.array([1], dtype=np.int32),
+        box=np.array([x - ox, y - oy, x - ox + w, y - oy + h], dtype=np.float32),
+        multimask_output=True)
+    cands = _candidates_from_masks(crop, masks, scores, ox, oy)
+    best = None
+    for c in cands:
+        try:
+            parts = split_instance(original, c, image.shape[:2])
+        except ValueError:
+            continue
+        if len(parts) == 2 and (best is None or c['area'] < best[0]['area']):
+            best = (c, parts)
+    if best is None:
+        return jsonify({'error': '点击处没有可拆分的子结构（SAM 候选与实例重合）。可换个位置点击，或改用"正负点修边"精修边界。'}), 400
+    return jsonify({'parts': best[1]})
+
+
 @app.post('/api/edit/merge')
 def api_merge():
     from utils.geometry import merge_instances
