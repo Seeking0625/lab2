@@ -1,4 +1,4 @@
-"""SAM 遥感图像自动分割模块（实验四 步骤一）
+"""SAM 遥感图像自动分割模块（实验二 步骤一）
 
 对大尺寸遥感图像分块调用 SAM 自动掩码生成器，把结果映射回全图坐标，
 去重后导出为多边形 JSON（实例 id / 类别 / bbox / 面积 / 置信度），
@@ -18,11 +18,14 @@ import numpy as np
 import torch
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
-CHECKPOINT = os.path.join(os.path.dirname(__file__), "..", "asset", "sam_vit_b_01ec64.pth")
+from utils.config import SAM_CHECKPOINT
+CHECKPOINT = str(SAM_CHECKPOINT)
 
 # ---------------- 分割核心 ----------------
 
 def build_sam(device: str = "cuda"):
+    if not os.path.isfile(CHECKPOINT):
+        raise FileNotFoundError("缺少SAM权重，请运行 python scripts/resources.py download，或设置 LAB2_SAM_CHECKPOINT。")
     sam = sam_model_registry["vit_b"](checkpoint=os.path.abspath(CHECKPOINT))
     sam.to(device=device)
     return sam
@@ -37,6 +40,8 @@ def segment_image(image_bgr: np.ndarray, generator: SamAutomaticMaskGenerator,
     否则大图上千实例会撑爆内存（4000x4000 单掩码即 16MB）。
     """
     H, W = image_bgr.shape[:2]
+    if not 0 <= overlap < tile_size:
+        raise ValueError('要求 0 <= overlap < tile_size。')
     instances = []
 
     ys = list(range(0, max(H - tile_size, 0) + 1, tile_size - overlap))
@@ -49,7 +54,7 @@ def segment_image(image_bgr: np.ndarray, generator: SamAutomaticMaskGenerator,
     for y0 in ys:
         for x0 in xs:
             tile = image_bgr[y0:y0 + tile_size, x0:x0 + tile_size]
-            for m in generator.generate(tile):
+            for m in generator.generate(cv2.cvtColor(tile, cv2.COLOR_BGR2RGB)):
                 if m["predicted_iou"] < score_thresh or m["area"] < min_area:
                     continue
                 seg = m["segmentation"]
@@ -121,11 +126,21 @@ def visualize(image_bgr: np.ndarray, instances: list, alpha: float = 0.45) -> np
     """实例多边形彩色叠加，用于快速质检。兼容 polygons 多环与旧版单环 polygon。"""
     canvas = image_bgr.copy()
     overlay = image_bgr.copy()
+    import hashlib
+    from utils.geometry import mask_for
+    with open(os.path.join(os.path.dirname(__file__), '..', 'classes.json'), encoding='utf-8') as f:
+        classes = {c['name']: c['color'] for c in json.load(f)}
     for i, inst in enumerate(instances):
-        color = _PALETTE[i % len(_PALETTE)].tolist()
+        cls = inst.get('class', 'unlabeled')
+        if cls == 'unlabeled':
+            color = [158, 158, 158]
+        else:
+            hex_color = classes.get(cls, '#' + hashlib.sha256(cls.encode()).hexdigest()[:6])
+            color = [int(hex_color[j:j+2], 16) for j in (5, 3, 1)]
         rings = inst.get("polygons") or [inst["polygon"]]
         pts_list = [np.array(r, dtype=np.int32) for r in rings]
-        cv2.fillPoly(overlay, pts_list, color)
+        mask = mask_for(inst, image_bgr.shape[:2])
+        overlay[mask != 0] = color
         for pts in pts_list:
             cv2.polylines(canvas, [pts], True, color, 2)
     return cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0)

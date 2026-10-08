@@ -58,5 +58,29 @@
  {
   "name": "tennis-court 网球场",
   "color": "#e6beff"
+ },
+ {
+  "name": "ship 船舶",
+  "color": "#0088aa"
+ },
+ {
+  "name": "baseball-diamond 棒球场",
+  "color": "#aa6644"
+ },
+ {
+  "name": "ground-track-field 田径场",
+  "color": "#cc8800"
+ },
+ {
+  "name": "other 背景/其他",
+  "color": "#888888"
+ },
+ {
+  "name": "停车位",
+  "color": "#4b2bee"
+ },
+ {
+  "name": "绿化",
+  "color": "#feb1a3"
  }
 ]

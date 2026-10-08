@@ -10,3 +10,26 @@ __pycache__/
 
 # 大尺寸可视化中间图
 results/vis/
+results/local_run/
+results/classifier/
+results/scales/
+results/*_f*.json
+results/video_VisDrone_*/
+dataset/videos/VisDrone_*.mp4
+results/backups/
+results/practice_*.json
+results/crop_*.json
+
+asset/dota_classifier/*.npz
+asset/dota_classifier/*.joblib
+asset/dota_classifier/split.json
+asset/dota_classifier/validation_predictions.json
+
+# Local datasets, exported runtime bundles and generated reports
+.venv/
+.env
+dataset/dota/
+*.part
+lab2-runtime*.zip
+results/report_*.md
+results/P*.json

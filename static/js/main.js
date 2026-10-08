@@ -6,8 +6,18 @@
 const $ = (s) => document.querySelector(s);
 const cv = $("#cv"), ctx = cv.getContext("2d");
 const UNLABELED_COLOR = "#9e9e9e";
+async function api(url, options) {
+  const r = await fetch(url, options);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `请求失败 (${r.status})`);
+  return data;
+}
+const post = (url, data) => api(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)});
+window.addEventListener("unhandledrejection", e => { hideBusy(); alert(e.reason?.message || String(e.reason)); e.preventDefault(); });
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 const state = {
+  catalog: [], prompts: null,
   images: [], imgIdx: -1, imageName: "",
   img: null, ann: null,
   classes: [], activeCls: 0,
@@ -57,10 +67,19 @@ function pointInRing(px, py, ring) {
   return inside;
 }
 
+function visibleInstances() {
+  if (!state.ann) return [];
+  const filter = $("#instanceFilter").value;
+  const minArea = Math.max(0, Number($("#minVisibleArea").value) || 0);
+  return state.ann.instances.filter(i => i.area >= minArea &&
+    (filter === "all" || (filter === "todo" ? i.class === "unlabeled" : i.class !== "unlabeled")));
+}
 function hitInstance(px, py) {
-  for (let i = state.ann.instances.length - 1; i >= 0; i--) {
-    const inst = state.ann.instances[i];
-    if ((inst.polygons || []).some((r) => pointInRing(px, py, r))) return inst;
+  const visible = visibleInstances();
+  for (let i = visible.length - 1; i >= 0; i--) {
+    const inst = visible[i];
+    if ((inst.polygons || []).some((r) => pointInRing(px, py, r)) &&
+        !(inst.holes || []).some(r => pointInRing(px, py, r))) return inst;
   }
   return null;
 }
@@ -89,23 +108,23 @@ function render() {
     ctx.drawImage(state.img, 0, 0);
   }
   const lw = 1.6 / scale;
-  for (const inst of state.ann.instances) {
+  for (const inst of $("#showMasks").checked ? visibleInstances() : []) {
     const sel = state.selected.has(inst.id);
     const hov = state.hoverId === inst.id;
     const color = clsColor(inst.class);
     ctx.lineWidth = sel ? lw * 2.2 : lw;
     ctx.strokeStyle = sel ? "#ffffff" : hov ? "#ffdd57" : color;
     ctx.setLineDash(sel ? [6 / scale, 4 / scale] : []);
-    for (const ring of inst.polygons || []) {
-      ctx.beginPath();
+    ctx.beginPath();
+    for (const ring of [...(inst.polygons || []), ...(inst.holes || [])]) {
       ring.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
       ctx.closePath();
+    }
       ctx.globalAlpha = 0.30;
       ctx.fillStyle = color;
-      ctx.fill();
+      ctx.fill("evenodd");
       ctx.globalAlpha = 1;
       ctx.stroke();
-    }
   }
   ctx.setLineDash([]);
   // SAM 候选预览
@@ -129,6 +148,16 @@ function render() {
     });
     ctx.setLineDash([]);
   }
+  // Positive/negative prompt markers remain visible while comparing candidates.
+  if (state.prompts) {
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    for (const [x,y,label] of state.prompts.points) {
+      const [sx,sy] = img2scr(x,y);
+      ctx.beginPath(); ctx.arc(sx,sy,5,0,Math.PI*2);
+      ctx.fillStyle = label ? "#76ff03" : "#ff5252"; ctx.fill();
+    }
+    ctx.setTransform(devicePixelRatio*scale,0,0,devicePixelRatio*scale,devicePixelRatio*ox,devicePixelRatio*oy);
+  }
   // 框选拖拽预览
   if (state.drag && state.drag.type === "box") {
     const d = state.drag;
@@ -147,7 +176,7 @@ function refreshClassList() {
   state.classes.forEach((c, i) => {
     const row = document.createElement("div");
     row.className = "cls-row" + (i === state.activeCls ? " active" : "");
-    row.innerHTML = `<span class="dot" style="background:${c.color}"></span><span>${i + 1}. ${c.name}</span>`;
+    row.innerHTML = `<span class="dot" style="background:${c.color}"></span><span>${i + 1}. ${escapeHtml(c.name)}</span>`;
     row.onclick = () => { state.activeCls = i; applyActiveClass(); refreshClassList(); };
     $("#clsList").appendChild(row);
   });
@@ -157,7 +186,7 @@ function applyActiveClass() {
   if (!state.ann || state.selected.size === 0) return;
   pushUndo();
   const name = state.classes[state.activeCls].name;
-  for (const id of state.selected) state.ann.instances[id].class = name;
+  for (const id of state.selected) { state.ann.instances[id].class = name; state.ann.instances[id].label_source = "manual"; }
   markDirty();
 }
 
@@ -167,8 +196,8 @@ function refreshSelInfo() {
     box.innerHTML = `<div class="helpline">未选中实例。点击画布中的彩色区域选择。</div>`;
     return;
   }
-  if (state.mode === "merge") {
-    box.innerHTML = `<div class="helpline">已选 ${state.selected.size} 个实例，再点画布可增减，点「合并所选」完成。</div>`;
+  if (state.mode === "merge" || state.selected.size > 1) {
+    box.innerHTML = `<div class="helpline">已选 ${state.selected.size} 个实例。点击左侧类别可批量标注；Shift+点击可增减选择。</div>`;
     const btn = document.createElement("button");
     btn.className = "primary"; btn.style.margin = "8px 12px";
     btn.textContent = `合并所选 (${state.selected.size})`;
@@ -182,17 +211,20 @@ function refreshSelInfo() {
   box.innerHTML = `
     <div class="info-row"><span>ID</span><b>#${inst.id}</b></div>
     <div class="info-row"><span>面积(px)</span><b>${inst.area.toLocaleString()}</b></div>
-    <div class="info-row"><span>分数</span><b>${inst.score}</b></div>
+    <div class="info-row"><span>SAM 分数</span><b>${inst.score}</b></div>
+    <div class="info-row"><span>分类置信分</span><b>${inst.class_score == null ? "—" : (inst.class_score * 100).toFixed(1) + "%"}</b></div>
+    <div style="padding:4px 12px">${(inst.class_candidates || []).map(c => escapeHtml(c.class) + " " + (c.score * 100).toFixed(0) + "%").join("；")}</div>
     <div class="info-row"><span>顶点</span><b>${(inst.polygons || []).reduce((s, r) => s + r.length, 0)}</b></div>
     <div style="padding:4px 12px">类别（下拉或按数字键）</div>
     <div style="padding:0 12px"><select id="instClass">
       <option value="">unlabeled</option>
-      ${state.classes.map((c) => `<option value="${c.name}" ${c.name === inst.class ? "selected" : ""}>${c.name}</option>`).join("")}
+      ${state.classes.map((c) => `<option value="${escapeHtml(c.name)}" ${c.name === inst.class ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}
     </select></div>
     <div style="padding:8px 12px"><button id="btnDel">删除实例 (Del)</button></div>`;
   $("#instClass").onchange = (e) => {
     pushUndo();
     inst.class = e.target.value || "unlabeled";
+    inst.label_source = "manual";
     markDirty();
   };
   $("#btnDel").onclick = deleteSelected;
@@ -201,14 +233,14 @@ function refreshSelInfo() {
 function refreshInstList() {
   const list = $("#instList");
   list.innerHTML = "";
-  $("#instCount").textContent = state.ann ? state.ann.instances.length : 0;
+  $("#instCount").textContent = state.ann ? `${visibleInstances().length}/${state.ann.instances.length}` : 0;
   if (!state.ann) return;
   const frag = document.createDocumentFragment();
-  state.ann.instances.forEach((inst) => {
+  visibleInstances().sort((a,b) => b.area-a.area).forEach((inst) => {
     const row = document.createElement("div");
     row.className = "inst-row";
     const unl = inst.class === "unlabeled";
-    row.innerHTML = `<span class="dot" style="background:${clsColor(inst.class)};display:inline-block;vertical-align:-2px;margin-right:6px"></span>#${inst.id} ${unl ? '<span style="color:#777">未标注</span>' : inst.class}`;
+    row.innerHTML = `<span class="dot" style="background:${clsColor(inst.class)};display:inline-block;vertical-align:-2px;margin-right:6px"></span>#${inst.id} ${unl ? '<span style="color:#777">未标注</span>' : escapeHtml(inst.class) + (inst.label_source === "model" ? "（预测）" : "")}`;
     row.onclick = () => {
       state.selected = new Set([inst.id]);
       centerOn(inst);
@@ -222,19 +254,20 @@ function refreshInstList() {
 function refreshStats() {
   const n = state.ann.instances.length;
   const labeled = state.ann.instances.filter((i) => i.class !== "unlabeled").length;
+  const predicted = state.ann.instances.filter(i => i.class !== "unlabeled" && i.label_source === "model").length;
   const byCls = {};
   state.ann.instances.forEach((i) => {
     if (i.class !== "unlabeled") byCls[i.class] = (byCls[i.class] || 0) + 1;
   });
   $("#stats").innerHTML =
-    `共 ${n} 实例 / 已标注 ${labeled}<br>` +
-    Object.entries(byCls).map(([k, v]) => `${k}: ${v}`).join("　");
+    `共 ${n} 实例 / 人工确认 ${labeled-predicted} / 预测待确认 ${predicted}<br>` +
+    Object.entries(byCls).map(([k, v]) => `${escapeHtml(k)}: ${v}`).join("　");
 }
 
 function centerOn(inst) {
   const [x, y, w, h] = bboxOf(inst);
   const wrap = $("#canvasWrap");
-  state.view.scale = Math.min(wrap.clientWidth / w, wrap.clientHeight / h, 2) * 0.9;
+  state.view.scale = Math.min(wrap.clientWidth / w, wrap.clientHeight / h, 8) * 0.9;
   state.view.ox = wrap.clientWidth / 2 - (x + w / 2) * state.view.scale;
   state.view.oy = wrap.clientHeight / 2 - (y + h / 2) * state.view.scale;
 }
@@ -248,27 +281,18 @@ function deleteSelected() {
   markDirty();
 }
 
-function mergeSelected() {
+async function mergeSelected() {
   if (state.selected.size < 2) return;
-  pushUndo();
-  const picked = state.ann.instances.filter((i) => state.selected.has(i.id));
-  const merged = {
-    class: picked.find((p) => p.class !== "unlabeled")?.class || "unlabeled",
-    bbox: [
-      Math.min(...picked.map((p) => p.bbox[0])), Math.min(...picked.map((p) => p.bbox[1])),
-      0, 0,
-    ],
-    area: picked.reduce((s, p) => s + p.area, 0),
-    score: Math.min(...picked.map((p) => p.score)),
-    polygons: picked.flatMap((p) => p.polygons || []),
-  };
-  merged.bbox[2] = Math.max(...picked.map((p) => p.bbox[0] + p.bbox[2])) - merged.bbox[0];
-  merged.bbox[3] = Math.max(...picked.map((p) => p.bbox[1] + p.bbox[3])) - merged.bbox[1];
-  state.ann.instances = state.ann.instances.filter((i) => !state.selected.has(i.id));
-  state.ann.instances.push(merged);
-  state.selected.clear();
-  markDirty();
-  setMode("select");
+  const picked = state.ann.instances.filter(i => state.selected.has(i.id));
+  showBusy("合并掩码…");
+  try {
+    const merged = await post("/api/edit/merge", {image:state.imageName, instances:picked});
+    pushUndo();
+    state.ann.instances = state.ann.instances.filter(i => !state.selected.has(i.id));
+    state.ann.instances.push(merged);
+    state.selected.clear();
+    markDirty(); setMode("select");
+  } finally { hideBusy(); }
 }
 
 function undo() {
@@ -296,6 +320,7 @@ async function samPoint(imgPt, replaceId) {
       }),
     });
     const cands = await r.json();
+    if (!r.ok) throw new Error(cands.error || "SAM 推理失败");
     if (!cands.length) return alert("SAM 未返回有效掩码，请换位置点击");
     pushUndo();
     state.pending = { cands, replaceId };
@@ -311,6 +336,7 @@ async function samBox(box) {
       body: JSON.stringify({ image: state.imageName, box: box.map(Math.round) }),
     });
     const cands = await r.json();
+    if (!r.ok) throw new Error(cands.error || "SAM 推理失败");
     if (!cands.length) return alert("SAM 未返回有效掩码，请框选更明显的目标");
     pushUndo();
     state.pending = { cands, replaceId: null };
@@ -331,19 +357,29 @@ function showCands(cands) {
   });
 }
 
-function applyCandidate(i) {
+async function applyCandidate(i) {
   if (!state.pending) return;
   const { cands, replaceId } = state.pending;
   const c = cands[i];
-  if (replaceId != null) {
+  if (state.pending.kind === "refine") {
+    const old = state.ann.instances[replaceId];
+    c.class = old.class;
+    if (old.label_source) c.label_source = old.label_source;
+    state.ann.instances[replaceId] = c;
+  } else if (replaceId != null) {
     const old = state.ann.instances[replaceId];
     c.class = old && old.class !== "unlabeled" ? old.class : "unlabeled";
-    state.ann.instances[replaceId] = c;
+    showBusy("拆分实例并保留剩余区域…");
+    try {
+      const parts = await post("/api/edit/split", {image:state.imageName, original:old, candidate:c});
+      state.ann.instances.splice(replaceId, 1, ...parts);
+    } finally { hideBusy(); }
   } else {
     c.class = state.classes[state.activeCls].name;
+    c.label_source = "manual";
     state.ann.instances.push(c);
   }
-  state.pending = null;
+  state.pending = null; state.prompts = null;
   state.dirty = true;
   markDirty();
   setMode(replaceId != null ? "select" : state.mode);
@@ -351,20 +387,26 @@ function applyCandidate(i) {
 
 function cancelPending() {
   if (!state.pending) return;
-  state.pending = null;
+  state.pending = null; state.prompts = null;
   state.undoStack.pop(); // 撤销时丢弃推送的快照
   render(); refreshSelInfo();
 }
 
 /* ---------------- 模式与提示 ---------------- */
 const HINTS = {
-  select: "左键点选实例；数字键 1-9 直接改类别",
+  select: "左键点选实例；数字键 1-9 改类别；按住空格拖动平移，滚轮缩放",
+  pan: "按住左键拖动平移图片，滚轮缩放；切回「选择/改类」编辑实例",
   merge: "依次点击需要合并的实例（可多点几个），右侧「合并所选」",
-  resegment: "点击某个实例内部：SAM 将以该点为提示重新分割并替换",
+  resegment: "点击实例内部进行拆分，采用候选后保留剩余区域",
+  refine: "先左键点选要修边的实例，再左键添加内部点、右键排除背景；最后采用候选",
+  crop: "拖出一个目标清楚的局部区域，保存为独立图片后再标注",
   box: "按住左键拖出矩形框住新目标：SAM 分割后作为新实例（用当前激活类别）",
 };
 function setMode(m) {
+  if (state.pending && m !== state.mode) cancelPending();
+  state.prompts = null;
   state.mode = m;
+  updateCanvasCursor();
   if (m !== "merge") state.selected.clear();
   document.querySelectorAll("button.mode").forEach((b) =>
     b.classList.toggle("active", b.dataset.mode === m));
@@ -376,26 +418,38 @@ function setMode(m) {
 }
 
 /* ---------------- 加载 ---------------- */
-async function loadImages() {
-  state.images = await (await fetch("/api/images")).json();
-  $("#imgCount").textContent = `(${state.images.length})`;
-  const list = $("#imgList");
-  state.images.forEach((name, i) => {
+async function loadImages(preferred = null) {
+  state.catalog = await api("/api/image-catalog");
+  let group = $("#imageGroup").value;
+  if (!state.catalog.some(i => group === "all" || i.kind === group)) {
+    group = "original"; $("#imageGroup").value = group;
+  }
+  const requested = preferred || new URLSearchParams(location.search).get("img");
+  const requestedItem = requested && state.catalog.find(i => i.name.replace(/\.[^.]+$/, "") === requested.replace(/\.[^.]+$/, ""));
+  if (requestedItem && requestedItem.kind !== group && group !== "all") {
+    group = requestedItem.kind; $("#imageGroup").value = group;
+  }
+  const items = state.catalog.filter(i => group === "all" || i.kind === group);
+  state.images = items.map(i => i.name);
+  $("#imgCount").textContent = `(${items.length}/${state.catalog.length})`;
+  const list = $("#imgList"); list.innerHTML = "";
+  items.forEach((item,i) => {
     const d = document.createElement("div");
-    d.textContent = name;
-    d.onclick = () => loadImage(i);
-    list.appendChild(d);
+    d.textContent = item.name;
+    d.title = `${item.source ? "来源 "+item.source+"；" : ""}${item.width || "?"}×${item.height || "?"}；${item.count} 个候选`;
+    d.onclick = () => loadImage(i); list.appendChild(d);
   });
-  await loadImage(Math.max(state.images.findIndex((n) => n.startsWith(
-    new URLSearchParams(location.search).get("img") || "P0000")), 0));
-  window.__state = state;  // 调试/自动化测试句柄
+  if (items.length) await loadImage(Math.max(state.images.findIndex(n => n === requestedItem?.name),0));
+  else $("#selInfo").textContent = state.catalog.length ? "该分组暂无图片，请切换其他分组。" : "暂无图片，请把图片放入 dataset/images，或配置 DOTA 数据目录后重启服务。";
+  window.__state = state;
 }
 
 async function loadImage(i) {
   if (i < 0 || i >= state.images.length) return;
+  if (state.dirty && !confirm("当前修改尚未保存，确定切换图片并放弃修改？")) return;
   state.imgIdx = i;
   state.imageName = state.images[i].replace(/\.[^.]+$/, "");
-  state.selected.clear(); state.pending = null; state.undoStack = [];
+  state.selected.clear(); state.pending = null; state.prompts = null; state.undoStack = [];
   state.dirty = false; $("#dirty").style.visibility = "hidden";
   document.querySelectorAll("#imgList div").forEach((d, k) =>
     d.classList.toggle("active", k === i));
@@ -428,8 +482,10 @@ async function loadImage(i) {
 async function runAutoSegment() {
   showBusy("SAM 自动分割中，大图约需 0.5~2 分钟…");
   try {
-    const r = await fetch(`/api/segment/${state.imageName}`, { method: "POST" });
-    state.ann = await r.json();
+    const r = await fetch(`/api/segment/${state.imageName}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({profile:$("#segmentProfile").value})});
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || "自动分割失败");
+    pushUndo(); state.ann = result;
     markDirty();
     state.dirty = false; $("#dirty").style.visibility = "hidden";
   } finally { hideBusy(); }
@@ -461,16 +517,21 @@ async function save() {
   if (!state.ann) return;
   showBusy("保存中…");
   try {
-    await fetch(`/api/annotation/${state.imageName}`, {
+    const r = await fetch(`/api/annotation/${state.imageName}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.ann),
     });
+    if (!r.ok) throw new Error((await r.json()).error || "保存失败");
     state.dirty = false;
     $("#dirty").style.visibility = "hidden";
   } finally { hideBusy(); }
 }
 
 /* ---------------- 事件绑定 ---------------- */
+function updateCanvasCursor() {
+  cv.style.cursor = state.drag?.type === "pan" ? "grabbing" :
+    (state.mode === "pan" || state.spaceDown ? "grab" : "default");
+}
 cv.addEventListener("wheel", (e) => {
   e.preventDefault();
   const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
@@ -483,14 +544,19 @@ cv.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 cv.addEventListener("mousedown", (e) => {
-  if (e.button === 1 || (e.button === 0 && state.spaceDown)) {
+  if (e.button === 1 || (e.button === 0 && (state.spaceDown || state.mode === "pan"))) {
     state.drag = { type: "pan", sx: e.offsetX, sy: e.offsetY, ox: state.view.ox, oy: state.view.oy };
     e.preventDefault();
+    updateCanvasCursor();
     return;
   }
-  if (e.button !== 0 || !state.ann) return;
+  if (!state.ann) return;
   const [ix, iy] = scr2img(e.offsetX, e.offsetY);
 
+  if (state.mode === "refine" && (e.button === 0 || e.button === 2)) {
+    e.preventDefault(); return refinePoint([ix,iy], e.button === 2 ? 0 : 1);
+  }
+  if (e.button !== 0) return;
   if (state.pending) {  // 候选确认期：点候选
     for (let k = 0; k < state.pending.cands.length; k++) {
       if ((state.pending.cands[k].polygons || []).some((r) => pointInRing(ix, iy, r)))
@@ -498,7 +564,7 @@ cv.addEventListener("mousedown", (e) => {
     }
     return cancelPending();
   }
-  if (state.mode === "box") {
+  if (state.mode === "box" || state.mode === "crop") {
     const [x0, y0] = scr2img(e.offsetX, e.offsetY);
     state.drag = { type: "box", x0, y0, x1: x0, y1: y0 };
     return;
@@ -513,7 +579,9 @@ cv.addEventListener("mousedown", (e) => {
   }
   // select / resegment
   if (state.mode === "resegment" && inst) return samPoint([ix, iy], inst.id);
-  state.selected = new Set(inst ? [inst.id] : []);
+  if (e.shiftKey && inst) {
+    state.selected.has(inst.id) ? state.selected.delete(inst.id) : state.selected.add(inst.id);
+  } else state.selected = new Set(inst ? [inst.id] : []);
   render(); refreshSelInfo(); refreshInstList();
 });
 
@@ -536,14 +604,15 @@ window.addEventListener("mouseup", (e) => {
   if (!state.drag) return;
   const d = state.drag;
   state.drag = null;
+  updateCanvasCursor();
   if (d.type === "box" && Math.abs(d.x1 - d.x0) > 8 && Math.abs(d.y1 - d.y0) > 8) {
-    samBox([Math.min(d.x0, d.x1), Math.min(d.y0, d.y1),
-            Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)]);
+    const box = [Math.min(d.x0,d.x1),Math.min(d.y0,d.y1),Math.abs(d.x1-d.x0),Math.abs(d.y1-d.y0)];
+    if (state.mode === "crop") cropRegion(box); else samBox(box);
   }
 });
 
 cv.addEventListener("mousemove", (e) => {
-  if (state.drag || !state.ann || state.pending) return;
+  if (state.drag || !state.ann || state.pending || state.mode === "pan" || state.spaceDown) return;
   const [ix, iy] = scr2img(e.offsetX, e.offsetY);
   const inst = hitInstance(ix, iy);
   const h = inst ? inst.id : null;
@@ -553,8 +622,8 @@ cv.addEventListener("mousemove", (e) => {
 cv.addEventListener("contextmenu", (e) => e.preventDefault());
 
 window.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && !e.repeat && document.activeElement.tagName !== "INPUT") {
-    state.spaceDown = true; e.preventDefault();
+  if (e.code === "Space" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
+    state.spaceDown = true; e.preventDefault(); updateCanvasCursor();
   }
   if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); return save(); }
   if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); return undo(); }
@@ -563,9 +632,14 @@ window.addEventListener("keydown", (e) => {
     state.selected.clear(); render(); refreshSelInfo();
     return;
   }
-  if (e.key === "Delete" || (e.key === "Backspace" && document.activeElement.tagName !== "INPUT")) {
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (e.key === "Delete" || e.key === "Backspace") {
     return deleteSelected();
   }
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (e.key === "Enter" && state.mode === "merge") return mergeSelected();
+  if (e.key === "Enter" && state.pending) return applyCandidate(0);
+  if (e.key.toLowerCase() === "n") return nextUnlabeled();
   if (/^[1-9]$/.test(e.key)) {
     const k = +e.key - 1;
     if (state.pending) {  // 候选确认期：数字键选用候选掩码
@@ -576,7 +650,12 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-window.addEventListener("keyup", (e) => { if (e.code === "Space") state.spaceDown = false; });
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") { state.spaceDown = false; updateCanvasCursor(); }
+});
+window.addEventListener("blur", () => {
+  state.spaceDown = false; state.drag = null; updateCanvasCursor(); render();
+});
 
 document.querySelectorAll("button.mode").forEach((b) =>
   b.addEventListener("click", () => setMode(b.dataset.mode)));
@@ -610,7 +689,7 @@ window.addEventListener("resize", resizeCanvas);
 let lastReport = null;
 
 function mdToHtml(md) {
-  const lines = md.split("\n");
+  const lines = escapeHtml(md).split("\n");
   let html = "", inTable = false;
   const closeTable = () => { if (inTable) { html += "</tbody></table>"; inTable = false; } };
   for (const ln of lines) {
@@ -670,3 +749,118 @@ $("#btnDlReport").onclick = () => {
   await loadImages();
   setMode("select");
 })();
+
+/* ---------------- 分类、尺度与视频实验 ---------------- */
+$("#btnAuto").onclick = async () => {
+  if (!state.ann) return;
+  if (state.ann.instances.length && !confirm("重新分割会替换当前实例。是否继续？")) return;
+  await runAutoSegment();
+};
+$("#btnConfirmLabels").onclick = () => {
+  if (!state.ann || !state.selected.size) return;
+  pushUndo();
+  for (const id of state.selected) {
+    const inst = state.ann.instances[id];
+    if (inst.class !== "unlabeled") inst.label_source = "manual";
+  }
+  markDirty();
+};
+$("#btnClassify").onclick = async () => {
+  if (!state.ann) return;
+  showBusy("区域自动分类…");
+  try {
+    const ann = await post(`/api/classify/${state.imageName}`, state.ann);
+    pushUndo(); state.ann = ann; markDirty();
+  } finally { hideBusy(); }
+};
+async function experiment(kind) {
+  if (state.dirty) await save();
+  const data = {kind, image:state.imageName, video:$("#videoSelect").value, stride:Number($("#videoStride").value)};
+  if (kind === "train") data.image_names = state.images;
+  const task = await post("/api/tasks", data);
+  const status = $("#taskStatus");
+  for (const id of ["#btnTrain", "#btnScale", "#btnVideo"]) $(id).disabled = true;
+  try {
+    while (true) {
+      const job = await api(`/api/tasks/${task.id}`);
+      status.textContent = `${kind}：${job.status === "queued" ? "等待运行" : "正在运行，可继续查看图片"}`;
+      if (job.status === "failed") throw new Error(job.error);
+      if (job.status === "done") {
+        status.textContent = "完成。";
+        const a = document.createElement("a");
+        a.href = "/api/artifacts/" + job.report;
+        a.textContent = "查看实验报告"; a.target = "_blank"; a.style.color = "#8db9ff";
+        status.appendChild(a);
+        if (kind === "video") {
+          if (state.dirty) await save();
+          await loadImages();
+        }
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } catch(e) { status.textContent = e.message; throw e; }
+  finally { for (const id of ["#btnTrain", "#btnScale", "#btnVideo"]) $(id).disabled = false; }
+}
+$("#btnTrain").onclick = () => experiment("train");
+$("#btnScale").onclick = () => experiment("scale");
+$("#btnVideo").onclick = () => experiment("video");
+api("/api/videos").then(names => {
+  for (const name of names) {
+    const option = document.createElement("option"); option.value = name; option.textContent = name;
+    $("#videoSelect").appendChild(option);
+  }
+});
+window.addEventListener("beforeunload", e => { if (state.dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+/* ---------------- Low-effort annotation workflow ---------------- */
+async function refinePoint(point, label) {
+  if (!state.prompts) {
+    const inst = hitInstance(point[0],point[1]);
+    if (!inst || !label) return;
+    state.prompts = {replaceId:inst.id, bbox:inst.bbox.slice(), points:[]};
+    pushUndo();
+  }
+  state.prompts.points.push([Math.round(point[0]),Math.round(point[1]),label]);
+  const prompts = state.prompts;
+  showBusy("根据正负点修正边界…");
+  try {
+    const cands = await post("/api/sam/point",{image:state.imageName,points:prompts.points,bbox:prompts.bbox});
+    if (!cands.length) throw new Error("未得到候选，请调整提示点或框选目标。");
+    state.pending = {cands,replaceId:prompts.replaceId,kind:"refine"};
+    showCands(cands);
+  } finally { hideBusy(); }
+}
+async function cropRegion(box) {
+  if (state.dirty) await save();
+  showBusy("保存局部图…");
+  try {
+    const ann = await post("/api/crop",{image:state.imageName,box:box.map(Math.round),annotation:state.ann});
+    $("#imageGroup").value = "crop";
+    await loadImages(ann.image);
+    setMode("select");
+  } finally { hideBusy(); }
+}
+function nextUnlabeled() {
+  const todo = visibleInstances().filter(i => i.class === "unlabeled").sort((a,b) => b.area-a.area);
+  if (!todo.length) { $("#taskStatus").textContent = "当前筛选范围没有待标注实例。"; return; }
+  const current = [...state.selected][0];
+  const idx = todo.findIndex(i => i.id === current);
+  const next = todo[(idx+1)%todo.length];
+  state.selected = new Set([next.id]); centerOn(next);
+  render(); refreshSelInfo(); refreshInstList();
+}
+$("#btnNextInstance").onclick = nextUnlabeled;
+for (const id of ["#instanceFilter","#minVisibleArea","#showMasks"]) {
+  $(id).onchange = () => {state.selected.clear();render();refreshInstList();refreshSelInfo();};
+}
+$("#imageGroup").onchange = async () => {
+  if (state.dirty) await save();
+  const group = $("#imageGroup").value;
+  const first = state.catalog.find(i => group === "all" || i.kind === group);
+  if (!first) {
+    $("#imageGroup").value = state.catalog.find(i => i.name.replace(/\.[^.]+$/, "") === state.imageName)?.kind || "all";
+    $("#taskStatus").textContent = "该分组还没有图片，可用“裁成局部图”创建。"; return;
+  }
+  await loadImages(first.name);
+};

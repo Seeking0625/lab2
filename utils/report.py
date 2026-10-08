@@ -1,4 +1,4 @@
-"""实验四 步骤三：标注结果 -> 自动分析报告
+"""实验二 步骤三：标注结果 -> 自动分析报告
 
 输入标注 JSON（utils.sam_segment 输出格式），输出：
 - 类别与数目统计、面积占比
@@ -15,7 +15,7 @@ REGION_RULES = {
     "机场/航空枢纽": {"airplane 飞机": 5, "helicopter 直升机": 4},
     "港口/码头": {"harbor 港口": 5, "large-vehicle 大型车辆": 1},
     "油库/储运区": {"storage-tank 储油罐": 5},
-    "体育场馆/学校": {"ground_track_field": 4, "soccer-ball-field 足球场": 4,
+    "体育场馆/学校": {"ground-track-field 田径场": 4, "soccer-ball-field 足球场": 4,
                       "basketball-court 篮球场": 3, "tennis-court 网球场": 3,
                       "swimming-pool 泳池": 2},
     "农业种植区": {"farmland 农田": 4},
@@ -120,6 +120,9 @@ def generate_report(ann: dict, classes: list | None = None) -> dict:
         if it["class"] != "unlabeled":
             labeled_area += it["area"]
     unlabeled = cls_count.pop("unlabeled", 0)
+    predicted = sum(i.get('class', 'unlabeled') != 'unlabeled' and i.get('label_source') == 'model'
+                    for i in ann.get('instances', []))
+    manual = len(ann.get('instances', [])) - unlabeled - predicted
     cls_area.pop("unlabeled", None)  # 面积统计仅保留已标注类别
 
     img_area = ann.get("width", 0) * ann.get("height", 0) or 1
@@ -145,6 +148,7 @@ def generate_report(ann: dict, classes: list | None = None) -> dict:
         f"（{ann.get('width', '?')} x {ann.get('height', '?')} px）",
         f"- 实例总数：{len(ann.get('instances', []))}（已标注 "
         f"{len(ann.get('instances', [])) - unlabeled}，未标注 {unlabeled}）",
+        f"- 类别来源：人工确认 {manual}，模型预测待确认 {predicted}。区域判断依赖这些类别的正确性。",
         f"- 已标注面积占全图：{labeled_area / img_area:.1%}",
         "",
         "## 类别统计",
@@ -173,6 +177,8 @@ def generate_report(ann: dict, classes: list | None = None) -> dict:
         "image": ann.get("image"),
         "total": len(ann.get("instances", [])),
         "labeled": len(ann.get("instances", [])) - unlabeled,
+        "manual": manual,
+        "predicted": predicted,
         "cls_count": dict(cls_count),
         "cls_area": {k: round(v, 1) for k, v in cls_area.items()},
         "region_type": region,

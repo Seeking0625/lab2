@@ -1,4 +1,4 @@
-"""实验四 步骤四：遥感视频自动分析
+"""实验二 步骤四：遥感视频自动分析
 
 把步骤一~三的分割/报告能力扩展到视频：
   抽关键帧 -> SAM 分割 -> 逐帧标注(JSON) -> 跨帧聚合 -> 视频级 Markdown 报告
@@ -15,6 +15,10 @@ import json
 import os
 import time
 from collections import defaultdict
+from pathlib import Path
+
+from utils.classifier import classify_annotation, load_model, write_json
+from utils.config import CLASSIFIER_MODEL
 
 import cv2
 import numpy as np
@@ -28,12 +32,18 @@ def synth_video(image_path: str, out_path: str, seconds: int = 12, fps: int = 25
                 out_size: tuple = (1280, 720)) -> str:
     """从一张大图合成平移+缩放航拍视频，用于验证视频分析流水线。"""
     img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"无法读取图像 {image_path}")
+    if seconds * fps < 2 or fps <= 0:
+        raise ValueError("合成视频至少需要两帧。")
     H, W = img.shape[:2]
     vw, vh = out_size
     n = seconds * fps
     win_w0, win_h0 = int(W * 0.35), int(W * 0.35 * vh / vw)      # 起始窗口(远)
     win_w1, win_h1 = int(W * 0.65), int(W * 0.65 * vh / vw)      # 结束窗口(近)
     writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, out_size)
+    if not writer.isOpened():
+        raise RuntimeError(f"无法写入视频 {out_path}")
     for i in range(n):
         t = i / (n - 1)
         ww = int(win_w0 + (win_w1 - win_w0) * t)
@@ -51,42 +61,48 @@ def synth_video(image_path: str, out_path: str, seconds: int = 12, fps: int = 25
 
 def extract_frames(video_path: str, stride: int, max_frames: int = 0) -> list:
     """按间隔抽关键帧，返回 [(frame_idx, t_sec, bgr)]。"""
+    if stride < 1 or max_frames < 0:
+        raise ValueError("stride 至少为1，max_frames 不能为负数。")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频 {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    declared_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frames = []
     idx = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        if idx % stride == 0:
-            frames.append((idx, idx / fps, frame))
+        current = idx
+        idx += 1
+        if current % stride == 0:
+            frames.append((current, current / fps, frame))
             if max_frames and len(frames) >= max_frames:
                 break
-        idx += 1
     # 注意：CAP_PROP_FRAME_* 在部分编解码下返回 -1，以首帧实际尺寸为准
-    meta = {"fps": fps, "total_frames": idx,
+    meta = {"fps": fps, "total_frames": max(declared_total, idx), "decoded_frames": idx,
             "width": frames[0][2].shape[1] if frames else 0,
             "height": frames[0][2].shape[0] if frames else 0}
     cap.release()
+    if not frames:
+        raise ValueError("视频没有可读取的关键帧。")
     return frames, meta
 
 # ---------------- 视频分析主流程 ----------------
 
 def analyze_video(video_path: str, out_dir: str, stride: int = 25,
-                  max_frames: int = 0, points_per_side: int = 16) -> dict:
+                  max_frames: int = 0, points_per_side: int = 16,
+                  model_path=None, image_dir="dataset/images", annotation_dir="results") -> dict:
     name = os.path.splitext(os.path.basename(video_path))[0]
-    out = os.path.join("results", f"video_{name}")
+    out = os.path.join(out_dir, f"video_{name}")
     os.makedirs(os.path.join(out, "frames"), exist_ok=True)
     os.makedirs(os.path.join(out, "overlays"), exist_ok=True)
 
-    print("加载 SAM ...")
-    sam = build_sam(_device())
-    generator = SamAutomaticMaskGenerator(
-        sam, points_per_side=points_per_side, pred_iou_thresh=0.86,
-        stability_score_thresh=0.9, min_mask_region_area=100)
+    generator = None  # 已有修正标注时无需重新分割
+    model = load_model(model_path) if model_path else None
+    os.makedirs(image_dir, exist_ok=True)
+    os.makedirs(annotation_dir, exist_ok=True)
 
     frames, meta = extract_frames(video_path, stride, max_frames)
     print(f"视频 {meta['width']}x{meta['height']} @ {meta['fps']:.1f}fps, "
@@ -97,6 +113,9 @@ def analyze_video(video_path: str, out_dir: str, stride: int = 25,
                              cv2.VideoWriter_fourcc(*"mp4v"),
                              max(meta["fps"] / stride, 1), (vw, vh))
 
+    if not writer.isOpened():
+        raise RuntimeError("无法创建输出视频。")
+
     frame_reports = []       # 每关键帧的 report dict
     cls_frames = defaultdict(set)   # 类别 -> 出现的关键帧序号集合
     cls_total = defaultdict(int)    # 类别 -> 累计实例次数
@@ -104,14 +123,31 @@ def analyze_video(video_path: str, out_dir: str, stride: int = 25,
 
     t0 = time.time()
     for k, (fidx, tsec, frame) in enumerate(frames):
-        instances = segment_image(frame, generator)
-        ann = {"image": f"{name}_f{fidx:05d}.jpg", "width": vw, "height": vh,
-               "instances": instances}
-        with open(os.path.join(out, "frames", f"f{fidx:05d}.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump(ann, f, ensure_ascii=False)
+        stem = f"{name}_f{fidx:05d}"
+        image_name = stem + ".png"
+        cv2.imwrite(os.path.join(image_dir, image_name), frame)
+        editable = Path(annotation_dir) / (stem + ".json")
+        if editable.exists():
+            ann = json.loads(editable.read_text(encoding="utf-8"))
+            if ann.get("width") != vw or ann.get("height") != vh:
+                raise ValueError(f"旧关键帧标注尺寸不匹配：{editable}")
+        else:
+            if generator is None:
+                print("加载 SAM ...")
+                generator = SamAutomaticMaskGenerator(build_sam(_device()),
+                    points_per_side=points_per_side, pred_iou_thresh=.86,
+                    stability_score_thresh=.9, min_mask_region_area=100)
+            ann = {"image": image_name, "width": vw, "height": vh,
+                   "instances": segment_image(frame, generator)}
+        ann.update(image=image_name, source_video=os.path.abspath(video_path), frame_index=fidx)
+        if model:
+            ann = classify_annotation(frame, ann, model, preserve_manual=True)
+        instances = ann["instances"]
+        write_json(editable, ann)
+        write_json(os.path.join(out, "frames", f"f{fidx:05d}.json"), ann)
 
         rep = generate_report(ann)
+        Path(out, "frames", f"f{fidx:05d}.md").write_text(rep["markdown"], encoding="utf-8")
         rep["t_sec"] = round(tsec, 2)
         frame_reports.append(rep)
         for c, cnt in rep["cls_count"].items():
@@ -134,12 +170,17 @@ def analyze_video(video_path: str, out_dir: str, stride: int = 25,
     ranked_regions = sorted(region_votes.items(), key=lambda kv: -kv[1])
     half = max(len(counts) // 2, 1)
     trend = ("前段平均实例数 %.0f -> 后段 %.0f，目标数量%s"
-             % (np.mean(counts[:half]), np.mean(counts[half:]),
-                "呈增多态势" if np.mean(counts[half:]) > np.mean(counts[:half]) * 1.1
-                else "呈减少态势" if np.mean(counts[half:]) < np.mean(counts[:half]) * 0.9
+             % (np.mean(counts[:half]), np.mean(counts[half:] or counts),
+                "呈增多态势" if np.mean(counts[half:] or counts) > np.mean(counts[:half]) * 1.1
+                else "呈减少态势" if np.mean(counts[half:] or counts) < np.mean(counts[:half]) * 0.9
                 else "基本稳定"))
 
+    if len(counts) == 1:
+        trend = "仅一个关键帧，无法判断时序趋势"
+
     md = ["# 遥感视频自动分析报告", "",
+          "类别累计数为各关键帧实例次数，不是跨帧去重后的目标数量。",
+          "分类来源：" + ("机器学习预测与保留的人工修正；预测类别仍需核验。" if model else "已保存的关键帧标注；未标注实例不参与类别判断。"),
           f"- 视频：{os.path.basename(video_path)}"
           f"（{meta['width']}x{meta['height']}，{meta['fps']:.0f}fps，"
           f"{meta['total_frames']} 帧 / {meta['total_frames'] / meta['fps']:.1f}s）",
@@ -197,8 +238,12 @@ def _device() -> str:
 # ---------------- CLI ----------------
 
 def main():
-    ap = argparse.ArgumentParser(description="遥感视频自动分析（实验四 步骤四）")
+    ap = argparse.ArgumentParser(description="遥感视频自动分析（实验二 步骤四）")
     ap.add_argument("--video", help="待分析视频路径")
+    ap.add_argument("--out", default="results")
+    ap.add_argument("--model", default=str(CLASSIFIER_MODEL), help="已训练的区域分类器")
+    ap.add_argument("--image-dir", default="dataset/images", help="导出关键帧供 UI 标注")
+    ap.add_argument("--annotation-dir", default="results", help="读取并保存可修正的关键帧标注")
     ap.add_argument("--synth-from", help="用单张遥感大图合成航拍测试视频")
     ap.add_argument("--synth-out", default="dataset/videos/synth.mp4")
     ap.add_argument("--stride", type=int, default=25, help="关键帧间隔")
@@ -213,8 +258,9 @@ def main():
             return
     if not args.video:
         ap.error("需要 --video 或 --synth-from")
-    analyze_video(args.video, "results", stride=args.stride,
-                  max_frames=args.max_frames, points_per_side=args.points_per_side)
+    analyze_video(args.video, args.out, stride=args.stride,
+                  max_frames=args.max_frames, points_per_side=args.points_per_side,
+                  model_path=args.model, image_dir=args.image_dir, annotation_dir=args.annotation_dir)
 
 
 if __name__ == "__main__":
